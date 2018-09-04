@@ -3,7 +3,7 @@
 #include <DNSServer.h>        // Local DNS Server used for redirecting all requests to the configuration portal
 #include <ESP8266WebServer.h> // Local WebServer used to serve the configuration portal
 #include <WiFiManager.h>      // https://github.com/tzapu/WiFiManager WiFi Configuration Magic
-#include <WebSocketsClient.h> // WebSocket communication
+#include <WebSocketsClient.h> // https://github.com/Links2004/arduinoWebSockets WebSocket communication
 
 #define LED_PIN 2
 #define SETUP_PIN 0
@@ -18,31 +18,30 @@ bool shouldSaveConfig = false;
 
 WebSocketsClient webSocket;
 
+void onWSConnect (uint8_t * payload, size_t length)  {
+  Serial.printf("[WS] Connected to %s!\n", payload);
+  webSocket.sendTXT("Connected");
+}
+
+void onWSDisconnect (uint8_t * payload, size_t length)  {
+  Serial.printf("[WS] Disconnected from %s\n", payload);
+}
+
+void onWSText (uint8_t * payload, size_t length)  {
+  Serial.printf("[WS] Text : %s\n", payload);
+}
+
+void onWSBin (uint8_t * payload, size_t length)  {
+  Serial.printf("[WS] Bin : %u\n", length);
+  hexdump(payload, length);
+}
+
 void webSocketEvent (WStype_t type, uint8_t * payload, size_t length) {
   switch(type) {
-    case WStype_DISCONNECTED: {
-      Serial.printf("[WSc] Disconnected!\n");
-    }
-    break;
-    case WStype_CONNECTED: {
-      Serial.printf("[WSc] Connected to url: %s\n", payload);
-      // send message to server when Connected
-      webSocket.sendTXT("Connected");
-    }
-    break;
-    case WStype_TEXT:
-    Serial.printf("[WSc] get text: %s\n", payload);
-
-    // send message to server
-    // webSocket.sendTXT("message here");
-    break;
-    case WStype_BIN:
-    Serial.printf("[WSc] get binary length: %u\n", length);
-    hexdump(payload, length);
-
-    // send data to server
-    // webSocket.sendBIN(payload, length);
-    break;
+    case WStype_DISCONNECTED: onWSDisconnect(payload, length); break;
+    case WStype_CONNECTED: onWSConnect(payload, length); break;
+    case WStype_TEXT: onWSText(payload, length); break;
+    //case WStype_BIN: onWSBin(payload, length); break;
   }
 }
 
@@ -101,6 +100,8 @@ void loadConfig () {
 
 // main loop
 void loop () {
+  webSocket.loop();
+
   // handle the number of (sucessive) clicks
   uint8_t clicks = clickCount();
 
@@ -109,8 +110,12 @@ void loop () {
     autoConnect();
   }
 
-  // DEBUG
   else if (clicks == 2) {
+    webSocketBegin();
+  }
+
+  // DEBUG
+  else if (clicks == 3) {
     Serial.print(F("server: "));
     Serial.println(server);
     Serial.print(F("port: "));
@@ -153,11 +158,21 @@ void autoConnect () {
   Serial.print(F("Port: "));
   Serial.println(port);
 
+  // save config ?
   if (shouldSaveConfig) {
     Serial.println(F("Save config!"));
     shouldSaveConfig = false;
     saveConfig();
   }
+}
+
+void webSocketBegin () {
+  // connect webSocket server
+  Serial.print(F("webSocketBegin before"));
+	webSocket.begin(server, atoi(port), "/");
+  webSocket.setReconnectInterval(5000);
+  webSocket.onEvent(webSocketEvent);
+  Serial.print(F("webSocketBegin after"));
 }
 
 // reset WiFi settings
