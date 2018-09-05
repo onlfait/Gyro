@@ -1,234 +1,102 @@
-#include <FS.h>               // File System
-#include <ESP8266WiFi.h>      // ESP8266 Core WiFi Library
-#include <DNSServer.h>        // Local DNS Server used for redirecting all requests to the configuration portal
-#include <ESP8266WebServer.h> // Local WebServer used to serve the configuration portal
-#include <WiFiManager.h>      // https://github.com/tzapu/WiFiManager WiFi Configuration Magic
-#include <WebSocketsClient.h> // https://github.com/Links2004/arduinoWebSockets WebSocket communication
+#include <Arduino.h>
+#include <ESP8266WiFi.h>
+#include <ESP8266WiFiMulti.h>
+#include <WebSocketsClient.h>
+#include <Hash.h>
 
-#define LED_PIN 2
-#define SETUP_PIN 0
-#define AP_SSID "ESP-GYRO"
-#define AP_TIMEOUT 180 // seconds
-#define SERVER_TXT "/server.txt"
+#define AP_SSID "skbamk.net"
+#define AP_PASSWORD "1-deux-3-quatre-5-six-7"
 
-char server[40] = "esp-gyro.local";
-char port[6] = "4242";
+#define SERVER_IP "192.168.1.112"
+#define SERVER_PORT 4224
 
-bool shouldSaveConfig = false;
-
+ESP8266WiFiMulti WiFiMulti;
 WebSocketsClient webSocket;
 
-void onWSConnect (uint8_t * payload, size_t length)  {
-  Serial.printf("[WS] Connected to %s!\n", payload);
-  webSocket.sendTXT("Connected");
-}
+#define USE_SERIAL Serial
 
-void onWSDisconnect (uint8_t * payload, size_t length)  {
-  Serial.printf("[WS] Disconnected from %s\n", payload);
-}
+#define MESSAGE_INTERVAL 30000
+#define HEARTBEAT_INTERVAL 25000
 
-void onWSText (uint8_t * payload, size_t length)  {
-  Serial.printf("[WS] Text : %s\n", payload);
-}
+uint64_t messageTimestamp = 0;
+uint64_t heartbeatTimestamp = 0;
 
-void onWSBin (uint8_t * payload, size_t length)  {
-  Serial.printf("[WS] Bin : %u\n", length);
-  hexdump(payload, length);
-}
+bool isConnected = false;
 
-void webSocketEvent (WStype_t type, uint8_t * payload, size_t length) {
+void webSocketEvent(WStype_t type, uint8_t * payload, size_t length) {
   switch(type) {
-    case WStype_DISCONNECTED: onWSDisconnect(payload, length); break;
-    case WStype_CONNECTED: onWSConnect(payload, length); break;
-    case WStype_TEXT: onWSText(payload, length); break;
-    //case WStype_BIN: onWSBin(payload, length); break;
+    case WStype_DISCONNECTED:
+    USE_SERIAL.printf("[WSc] Disconnected!\n");
+    isConnected = false;
+    break;
+    case WStype_CONNECTED:
+    {
+      USE_SERIAL.printf("[WSc] Connected to url: %s\n",  payload);
+      isConnected = true;
+
+      // send message to server when Connected
+      // socket.io upgrade confirmation message (required)
+      webSocket.sendTXT("5");
+    }
+    break;
+    case WStype_TEXT:
+    USE_SERIAL.printf("[WSc] get text: %s\n", payload);
+
+    // send message to server
+    // webSocket.sendTXT("message here");
+    break;
+    case WStype_BIN:
+    USE_SERIAL.printf("[WSc] get binary length: %u\n", length);
+    hexdump(payload, length);
+
+    // send data to server
+    // webSocket.sendBIN(payload, length);
+    break;
   }
 }
 
-// initialization
-void setup () {
-  Serial.begin(115200);
-  Serial.println();
-  Serial.println();
+void setup() {
+  USE_SERIAL.begin(115200);
 
-  // set led pin mode
-  pinMode(LED_PIN, OUTPUT);
+  //Serial.setDebugOutput(true);
+  USE_SERIAL.setDebugOutput(true);
 
-  // init file system
-  initConfig();
-}
+  USE_SERIAL.println();
+  USE_SERIAL.println();
+  USE_SERIAL.println();
 
-// init file system
-void initConfig () {
-  SPIFFS.begin();
-  if (SPIFFS.exists(SERVER_TXT)) {
-    loadConfig();
-  } else {
-    saveConfig();
+  for(uint8_t t = 4; t > 0; t--) {
+    USE_SERIAL.printf("[SETUP] BOOT WAIT %d...\n", t);
+    USE_SERIAL.flush();
+    delay(1000);
   }
-}
 
-void saveConfig () {
-  File file = SPIFFS.open(SERVER_TXT, "w+");
-  if (file) {
-    file.println(server);
-    file.println(port);
-    file.close();
+  WiFiMulti.addAP(AP_SSID, AP_PASSWORD);
+
+  //WiFi.disconnect();
+  while(WiFiMulti.run() != WL_CONNECTED) {
+    delay(100);
   }
+
+  webSocket.beginSocketIO(SERVER_IP, SERVER_PORT);
+  webSocket.onEvent(webSocketEvent);
 }
 
-void loadConfig () {
-  File file = SPIFFS.open(SERVER_TXT, "r");
-  if (file) {
-    strcpy(server, file.readStringUntil('\n').c_str());
-    strcpy(port, file.readStringUntil('\n').c_str());
-    file.close();
-  }
-}
-
-// void listFile () {
-//   Serial.println("listFile");
-//   Dir dir = SPIFFS.openDir("/");
-//   while (dir.next()) {
-//     Serial.println(dir.fileName());
-//     File file = dir.openFile("r");
-//     Serial.println(file.readStringUntil('\n'));
-//     Serial.println(file.readStringUntil('\n'));
-//     file.close();
-//   }
-// }
-
-// main loop
-void loop () {
+void loop() {
   webSocket.loop();
 
-  // handle the number of (sucessive) clicks
-  uint8_t clicks = clickCount();
+  if(isConnected) {
+    uint64_t now = millis();
 
-  // auto connect
-  if (clicks == 1) {
-    autoConnect();
+    if(now - messageTimestamp > MESSAGE_INTERVAL) {
+      messageTimestamp = now;
+      USE_SERIAL.println("send message...");
+      webSocket.sendTXT("4HelloWorld");
+    }
+    if((now - heartbeatTimestamp) > HEARTBEAT_INTERVAL) {
+      heartbeatTimestamp = now;
+      // socket.io heartbeat message
+      webSocket.sendTXT("2");
+    }
   }
-
-  else if (clicks == 2) {
-    webSocketBegin();
-  }
-
-  // DEBUG
-  else if (clicks == 3) {
-    Serial.print(F("server: "));
-    Serial.println(server);
-    Serial.print(F("port: "));
-    Serial.println(port);
-  }
-
-  // reset settings
-  else if (clicks == 5) {
-    resetSettings();
-    SPIFFS.format();
-  }
-}
-
-// auto connect
-void autoConnect () {
-  // ...
-  WiFiManager wifiManager;
-
-  // id/name placeholder/prompt default length
-  WiFiManagerParameter custom_server("server", "server", server, 40);
-  WiFiManagerParameter custom_port("port", "port", port, 6);
-
-  wifiManager.addParameter(&custom_server);
-  wifiManager.addParameter(&custom_port);
-
-  wifiManager.setSaveConfigCallback(saveConfigCallback);
-  wifiManager.setTimeout(AP_TIMEOUT);
-
-  if (!wifiManager.autoConnect(AP_SSID)) {
-    return;
-  }
-
-  // read updated parameters
-  strcpy(server, custom_server.getValue());
-  strcpy(port, custom_port.getValue());
-
-  Serial.print(F("Server: "));
-  Serial.println(server);
-
-  Serial.print(F("Port: "));
-  Serial.println(port);
-
-  // save config ?
-  if (shouldSaveConfig) {
-    Serial.println(F("Save config!"));
-    shouldSaveConfig = false;
-    saveConfig();
-  }
-}
-
-void webSocketBegin () {
-  // connect webSocket server
-  Serial.print(F("webSocketBegin before"));
-	webSocket.begin(server, atoi(port), "/");
-  webSocket.setReconnectInterval(5000);
-  webSocket.onEvent(webSocketEvent);
-  Serial.print(F("webSocketBegin after"));
-}
-
-// reset WiFi settings
-void resetSettings () {
-  WiFiManager wifiManager;
-  wifiManager.resetSettings();
-}
-
-// on connect and settings change
-void saveConfigCallback () {
-  shouldSaveConfig = true;
-}
-
-// blink the led
-void blink (uint8_t count, uint16_t millis) {
-  for (uint8_t i = 0; i < count; i++) {
-    digitalWrite(LED_PIN, HIGH);
-    delay(millis);
-    digitalWrite(LED_PIN, LOW);
-    delay(millis);
-  }
-}
-
-// return the number of (sucessive) clicks
-uint8_t clickCount () {
-  static uint8_t clicks = 0;
-  static bool lastValue = HIGH;
-  static uint8_t debounce = 100;
-  static uint16_t timeout = 1000;
-  static unsigned long lastClick = 0;
-
-  // get elapsed time
-  unsigned long now = millis();
-  unsigned long elapsed = now - lastClick;
-
-  // read current value
-  bool value = digitalRead(SETUP_PIN);
-
-  // sync LED value
-  digitalWrite(LED_PIN, value);
-
-  // multiple clicks timeout
-  if (clicks > 0 && elapsed > timeout) {
-    uint8_t ret = clicks;
-    blink(clicks, 200);
-    clicks = 0;
-    return ret;
-  }
-
-  // button up (click)
-  if (value == HIGH && lastValue == LOW && elapsed > debounce) {
-    lastClick = now;
-    clicks++;
-  }
-
-  // update last value
-  lastValue = value;
-  return 0;
 }
